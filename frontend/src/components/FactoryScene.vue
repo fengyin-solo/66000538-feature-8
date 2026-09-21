@@ -8,8 +8,10 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js'
 import { useFactoryStore } from '../store/factory'
+import { useViewStore } from '../store/view'
 import { DEVICE_COLORS, STATUS_COLORS } from '../types'
 const store = useFactoryStore()
+const view = useViewStore()
 const container = ref<HTMLDivElement>()
 let scene: THREE.Scene, camera: THREE.PerspectiveCamera, renderer: THREE.WebGLRenderer, controls: OrbitControls, animId: number
 const deviceGroup = new THREE.Group()
@@ -91,9 +93,33 @@ function updateDevices() {
 }
 
 function animate() { animId = requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera) }
-onMounted(() => { initScene(); animate() })
+
+function onResize() {
+  const c = container.value
+  if (!c || !renderer || !camera) return
+  const w = c.clientWidth, h = c.clientHeight
+  if (w === 0 || h === 0) return
+  camera.aspect = w / h
+  camera.updateProjectionMatrix()
+  renderer.setSize(w, h)
+}
+
+// 大屏模式下缓慢环绕展示，便于无人值守投屏；退出后恢复手动视角
+watch(() => view.readonly, (ro) => {
+  if (controls) controls.autoRotate = ro
+})
+
+let resizeRO: ResizeObserver
+onMounted(() => {
+  initScene()
+  controls.autoRotate = view.readonly
+  controls.autoRotateSpeed = 0.6
+  resizeRO = new ResizeObserver(onResize)
+  resizeRO.observe(container.value!)
+  animate()
+})
 watch(() => store.data, updateDevices, { deep: true })
-onUnmounted(() => { cancelAnimationFrame(animId); renderer?.dispose() })
+onUnmounted(() => { cancelAnimationFrame(animId); resizeRO?.disconnect(); renderer?.dispose() })
 </script>
 
 <style scoped>

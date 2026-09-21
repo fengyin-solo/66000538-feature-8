@@ -1,7 +1,8 @@
 import asyncio, math, random, time, json, threading
 from collections import defaultdict, deque
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import numpy as np
 
@@ -44,6 +45,9 @@ production_log = []
 anomaly_log = []
 
 class AnomalyRules:
+    # 数值口径（单位）随规则一并下发，两种模式下页面图例/口径保持一致
+    FIELD_UNITS = {"temperature": "°C", "vibration": "mm/s", "pressure": "MPa"}
+
     def __init__(self):
         self.rules = [
             {"name": "高温告警", "field": "temperature", "threshold": 48, "op": "gt"},
@@ -51,6 +55,18 @@ class AnomalyRules:
             {"name": "压力异常", "field": "pressure", "threshold": 1.5, "op": "gt"},
         ]
         self.windows = defaultdict(lambda: deque(maxlen=10))
+
+    def describe(self):
+        return [
+            {
+                "name": r["name"],
+                "field": r["field"],
+                "op": r["op"],
+                "threshold": r["threshold"],
+                "unit": self.FIELD_UNITS.get(r["field"], ""),
+            }
+            for r in self.rules
+        ]
 
     def check(self, dev: DeviceState):
         triggers = []
@@ -168,6 +184,54 @@ def get_oee():
 @app.get("/api/production")
 def get_production():
     return {"log": production_log[-60:]}
+
+
+@app.get("/api/rules")
+def get_rules():
+    """当前生效的异常检测阈值参数（只读获取，任何账号可见）。"""
+    return {"rules": rules_engine.describe()}
+
+
+class RuleThreshold(BaseModel):
+    field: str
+    threshold: float
+
+
+def enforce_writable(request: Request):
+    """
+    大屏只读模式为受控视图：写操作必须显式携带 X-View-Mode: interactive。
+    缺失或为 readonly 一律拒绝，确保前端绕过（越权）也无法改动数据。
+    """
+    mode = request.headers.get("x-view-mode", "")
+    if mode != "interactive":
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "当前处于大屏只读展示模式，参数修改与保存已被禁用；退出只读模式后方可操作。"
+            },
+        )
+    return None
+
+
+@app.put("/api/rules")
+async def update_rules(payload: list[RuleThreshold], request: Request):
+    denied = enforce_writable(request)
+    if denied is not None:
+        return denied
+
+    fields = {r["field"] for r in rules_engine.describe()}
+    incoming = {item.field: item.threshold for item in payload}
+    unknown = set(incoming) - fields
+    if unknown:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"存在未知的参数字段: {sorted(unknown)}"},
+        )
+
+    for rule in rules_engine.rules:
+        if rule["field"] in incoming:
+            rule["threshold"] = incoming[rule["field"]]
+    return {"rules": rules_engine.describe()}
 
 
 @app.websocket("/ws")
