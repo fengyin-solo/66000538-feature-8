@@ -1,6 +1,7 @@
 import asyncio, math, random, time, json, threading
 from collections import defaultdict, deque
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import List, Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import numpy as np
@@ -12,6 +13,15 @@ DEVICE_TYPES = ["CNC", "RobotArm", "Conveyor", "AGV", "InjectionMolding", "QCSta
 STATUSES = ["RUNNING", "IDLE", "FAULT", "OFFLINE"]
 ACTIVE_CLIENTS: list[WebSocket] = []
 SIMULATOR_RUNNING = True
+
+# 账号与角色：viewer 为只读账号，任何写操作在服务端都会被拒绝
+ACCOUNTS = {
+    "admin": {"name": "管理员", "role": "admin"},
+    "operator": {"name": "操作员", "role": "operator"},
+    "viewer": {"name": "访客", "role": "viewer"},
+}
+WRITE_ROLES = {"admin", "operator"}
+DEFAULT_ACCOUNT = "viewer"  # 未携带账号时按只读处理（受控默认）
 
 class DeviceState:
     def __init__(self, did: int, dtype: str, x: float, y: float, z: float):
@@ -51,10 +61,24 @@ class AnomalyRules:
             {"name": "压力异常", "field": "pressure", "threshold": 1.5, "op": "gt"},
         ]
         self.windows = defaultdict(lambda: deque(maxlen=10))
+        self.lock = threading.Lock()
+
+    def snapshot(self):
+        with self.lock:
+            return [dict(r) for r in self.rules]
+
+    def update_thresholds(self, updates: dict):
+        # 整体替换规则列表，模拟线程读到的始终是完整一致的旧版或新版
+        with self.lock:
+            new_rules = [dict(r) for r in self.rules]
+            for r in new_rules:
+                if r["name"] in updates:
+                    r["threshold"] = float(updates[r["name"]])
+            self.rules = new_rules
 
     def check(self, dev: DeviceState):
         triggers = []
-        for rule in self.rules:
+        for rule in self.snapshot():
             val = getattr(dev, rule["field"])
             if (rule["op"] == "gt" and val > rule["threshold"]) or (rule["op"] == "lt" and val < rule["threshold"]):
                 triggers.append({"device_id": dev.id, "rule": rule["name"],
@@ -147,6 +171,62 @@ class OEEAnalysis(BaseModel):
     availability: float
     performance: float
     quality: float
+
+
+class RuleUpdate(BaseModel):
+    name: str
+    threshold: float
+
+
+class ConfigUpdate(BaseModel):
+    rules: List[RuleUpdate]
+
+
+def resolve_account(x_account: Optional[str]) -> Optional[str]:
+    """返回有效账号 id；未携带或未知账号返回 None（视为越权）。"""
+    if x_account and x_account in ACCOUNTS:
+        return x_account
+    return None
+
+
+@app.get("/api/accounts")
+def get_accounts():
+    return {"accounts": [
+        {"id": aid, "name": a["name"], "role": a["role"], "can_write": a["role"] in WRITE_ROLES}
+        for aid, a in ACCOUNTS.items()
+    ]}
+
+
+@app.get("/api/session")
+def get_session(account: str = DEFAULT_ACCOUNT):
+    acct = ACCOUNTS.get(account)
+    if not acct:
+        raise HTTPException(status_code=404, detail="未知账号")
+    return {"account": account, "name": acct["name"], "role": acct["role"],
+            "can_write": acct["role"] in WRITE_ROLES}
+
+
+@app.get("/api/config")
+def get_config():
+    return {"rules": rules_engine.snapshot()}
+
+
+@app.put("/api/config")
+def update_config(cfg: ConfigUpdate, x_account: Optional[str] = Header(None)):
+    # 越权防护：只读/未知账号一律拒绝，且不改动任何数据
+    account = resolve_account(x_account)
+    if account is None or ACCOUNTS[account]["role"] not in WRITE_ROLES:
+        raise HTTPException(status_code=403,
+                            detail="当前账号为只读权限，参数修改已被服务端拒绝，数据未被更改")
+    # 先整体校验，全部通过后才落库，避免部分修改
+    known = {r["name"] for r in rules_engine.snapshot()}
+    for item in cfg.rules:
+        if item.name not in known:
+            raise HTTPException(status_code=400, detail=f"未知规则: {item.name}")
+        if not (0 < item.threshold <= 200):
+            raise HTTPException(status_code=400, detail=f"阈值超出允许范围(0,200]: {item.name}")
+    rules_engine.update_thresholds({r.name: r.threshold for r in cfg.rules})
+    return get_config()
 
 
 @app.on_event("startup")

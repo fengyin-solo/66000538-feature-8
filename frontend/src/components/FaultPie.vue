@@ -18,8 +18,9 @@ function update() {
       itemStyle:{borderColor:'#0d1b2a',borderWidth:2}}],animation:false
   })
 }
-onMounted(()=>{if(chart.value){inst=echarts.init(chart.value);update()}})
+function resize(){ inst?.resize() }
+onMounted(()=>{if(chart.value){inst=echarts.init(chart.value);update()};window.addEventListener('resize',resize)})
 watch(()=>store.data,update)
-onUnmounted(()=>inst?.dispose())
+onUnmounted(()=>{window.removeEventListener('resize',resize);inst?.dispose()})
 </script>
 <style scoped>.chart-panel{background:#0d1b2a;border-radius:8px;padding:12px;border:1px solid #1e3a5f}.chart-panel h4{color:#64b5f6;font-size:13px;margin-bottom:4px}.chart{width:100%;height:200px}</style>

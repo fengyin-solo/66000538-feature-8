@@ -30,3 +30,11 @@ export const DEVICE_COLORS: Record<string, string> = {
 export const STATUS_COLORS: Record<string, string> = {
   RUNNING: '#2ecc71', IDLE: '#f1c40f', FAULT: '#e74c3c', OFFLINE: '#95a5a6'
 }
+
+export interface RuleConfig {
+  name: string; field: string; threshold: number; op: string
+}
+
+export interface AccountInfo {
+  id: string; name: string; role: string; can_write: boolean
+}

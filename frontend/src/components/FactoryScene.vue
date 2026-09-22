@@ -91,9 +91,16 @@ function updateDevices() {
 }
 
 function animate() { animId = requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera) }
-onMounted(() => { initScene(); animate() })
+function onResize() {
+  if (!container.value || !renderer) return
+  const c = container.value
+  camera.aspect = c.clientWidth / c.clientHeight
+  camera.updateProjectionMatrix()
+  renderer.setSize(c.clientWidth, c.clientHeight)
+}
+onMounted(() => { initScene(); animate(); window.addEventListener('resize', onResize) })
 watch(() => store.data, updateDevices, { deep: true })
-onUnmounted(() => { cancelAnimationFrame(animId); renderer?.dispose() })
+onUnmounted(() => { cancelAnimationFrame(animId); window.removeEventListener('resize', onResize); renderer?.dispose() })
 </script>
 
 <style scoped>
